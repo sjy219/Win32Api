@@ -1,0 +1,28 @@
+#include <Windows.h>
+#include <iostream>
+#include <stdio.h>
+using namespace std;
+
+int main()
+{
+	HKEY pHkey = NULL;
+	long nResult = RegOpenKeyEx(HKEY_CURRENT_USER, "Software\\Google\\Chrome\\BLBeacon", 0, KEY_QUERY_VALUE, &pHkey);
+	long cKey = NULL;
+
+	if (nResult == ERROR_SUCCESS)
+	{
+		
+		printf("success\n");
+
+	}
+	else
+	{
+		cout << "ERROR" << endl;
+	}
+
+	if (RegCloseKey(pHkey)==ERROR_SUCCESS)
+	{
+		printf("success\n");
+	}
+	return 0;
+}
