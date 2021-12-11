@@ -1,0 +1,25 @@
+//windows控制台程序
+
+#include <Windows.h>
+#include <stdio.h>
+
+HWND hwnd;
+HDC hdc;
+int main()
+{
+	hwnd = GetDesktopWindow();
+	hdc = GetDC(NULL);
+	
+	int i, j;
+	for (i=0;i<100;i++)
+	{
+		for (j=0;j<100;j++)
+		{
+			SetPixel(hdc, j, i, RGB(255, 0, 0));
+		}
+	}
+
+	ReleaseDC(NULL,hdc);
+
+	return 0;
+}
