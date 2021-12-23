@@ -1,0 +1,24 @@
+#include <Windows.h>
+#include <stdio.h>
+//前提是：只有欲获取的模块已映射到调用该函数的进程内，才会正确得到模块句柄。常用模块映射函数：LoadLibrary（..）。
+
+int main()
+{
+	HMODULE hModule;
+	char name[] = "D:\\ProgDes\\KanXue\\pEtest1\\Debug\\Dumped.exe";
+	int iCode = 0;
+	char Addr[128]; 
+	hModule = GetModuleHandle("dumped.exe");
+	if (!hModule)
+	{
+		printf("Error\n");
+		iCode = GetLastError();
+		printf("ErrorCode: %d\n", iCode);
+		hModule = LoadLibrary("dumped.exe");
+	}
+	sprintf(Addr, "Handle: 0x%x\n", hModule);
+	printf("Handle %s\n", Addr);
+	
+	
+	return 0;
+}
