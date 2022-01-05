@@ -1,0 +1,224 @@
+#include <ntddk.h>
+#include <ntddkbd.h>
+
+#define DEVICE_NAME L"\\Device\\Keyboard"
+#define SYMBOL_LINK_XP L"\\DosDevices\\Keyboard"
+#define SYMBOL_LINK_WIN7 L"\\DosDevices\\Global\\Keyboard"
+
+typedef struct _DEVICE_EXTENSION
+{
+	PDEVICE_OBJECT pAttachDevObj;
+	ULONG uIrpInQueue;
+}DEVICE_EXTENSION, *PDEVICE_EXTENSION;
+
+VOID ShowError(PCHAR msg, NTSTATUS status);
+VOID DriverUnload(PDRIVER_OBJECT driverObject);
+NTSTATUS DispatchCommon(PDEVICE_OBJECT pObj, PIRP pIrp);
+NTSTATUS DispatchRead(PDEVICE_OBJECT pObj, PIRP pIrp);
+NTSTATUS ReadCompleteRoutine(PDEVICE_OBJECT pDevObj, PIRP pIrp, PVOID pContext);
+
+
+NTSTATUS DriverEntry(PDRIVER_OBJECT driverObject, PUNICODE_STRING registryPath)
+{
+	NTSTATUS status = STATUS_SUCCESS;
+	UNICODE_STRING uDeviceName = RTL_CONSTANT_STRING(DEVICE_NAME), uSymbolLinkName;
+	UNICODE_STRING uStrObjName = RTL_CONSTANT_STRING(L"\\Device\\KeyboardClass0");
+	ULONG i = 0;
+	PFILE_OBJECT pFileObj = NULL;
+	PDEVICE_OBJECT pKeyboardClassDeveObj = NULL, pAttachDevObj = NULL, pDeviceObj = NULL;
+	DbgPrint("驱动加载成功\r\n");
+
+	//创建键盘设备
+	status = IoCreateDevice(driverObject,
+		sizeof(DEVICE_EXTENSION),
+		&uDeviceName,
+		FILE_DEVICE_KEYBOARD,
+		0,
+		FALSE,
+		&pDeviceObj);
+
+	if (!NT_SUCCESS(status))
+	{
+		ShowError("IoCreateDevice", status);
+		goto exit;
+	}
+
+	//创建符号链接
+	if (IoIsWdmVersionAvailable(1, 0x10))
+	{
+		RtlInitUnicodeString(&uSymbolLinkName, SYMBOL_LINK_WIN7);
+	}
+	else
+	{
+		RtlInitUnicodeString(&uSymbolLinkName, SYMBOL_LINK_XP);
+
+	}
+	if (IoIsWdmVersionAvailable(6, 0x00))
+	{
+		DbgPrint("win7系统\r\n");
+	}
+
+	//创建符号链接
+	status = IoCreateSymbolicLink(&uSymbolLinkName, &uDeviceName);
+	if (!NT_SUCCESS(status))
+	{
+		ShowError("IoCreateSymboliLink", status);
+		goto exit;
+	}
+
+	//获取键盘设备指针
+	status = IoGetDeviceObjectPointer(&uStrObjName, 
+		GENERIC_READ | GENERIC_WRITE, 
+		&pFileObj, &pKeyboardClassDeveObj);
+	if (!NT_SUCCESS(status))
+	{
+		ShowError("IoGetDeviceObjectPointer", status);
+		goto exit;
+	}
+
+	//减少引用
+	ObDereferenceObject(pFileObj);
+
+	//将当前设备附加到键盘设备的设备栈顶上
+	pAttachDevObj = IoAttachDeviceToDeviceStack(pDeviceObj, pKeyboardClassDeveObj);
+	if (pAttachDevObj == NULL)
+	{
+		DbgPrint("附件设备栈失败\r\n");
+		goto exit;
+	}
+
+	//设置设备标志与附加到设备栈上的设备标志一致
+	pDeviceObj->Flags = pDeviceObj->Flags | DO_BUFFERED_IO | DO_POWER_PAGABLE;
+	pDeviceObj->ActiveThreadCount = pDeviceObj->ActiveThreadCount & (~DO_DEVICE_HAS_NAME);
+
+	//保存下一个设备到DeviceExtension
+	((PDEVICE_EXTENSION)pDeviceObj->DeviceExtension)->pAttachDevObj = pAttachDevObj;
+	((PDEVICE_EXTENSION)pDeviceObj->DeviceExtension)->uIrpInQueue = 0;
+
+	for (i = 0; i < IRP_MJ_MAXIMUM_FUNCTION; i++)
+	{
+		driverObject->MajorFunction[i] = DispatchCommon;
+	}
+	driverObject->MajorFunction[IRP_MJ_READ] = DispatchRead;
+
+exit:
+	driverObject->DriverUnload = DriverUnload;
+	return STATUS_SUCCESS;
+}
+
+
+NTSTATUS DispatchRead(PDEVICE_OBJECT pObj, PIRP pIrp)
+{
+	NTSTATUS status = STATUS_SUCCESS;
+	//复制pIrp的IO_STACK_LOACTION 到下一设备
+	IoCopyCurrentIrpStackLocationToNext(pIrp);
+
+	//设置完成例程
+	IoSetCompletionRoutine(pIrp, ReadCompleteRoutine, pObj, TRUE, TRUE, TRUE);
+
+	//记录IPR数量
+	((PDEVICE_EXTENSION)pObj->DeviceExtension)->uIrpInQueue++;
+
+	//发送IPR到下一个设备
+	status = IoCallDriver(((PDEVICE_EXTENSION)pObj->DeviceExtension)->pAttachDevObj, pIrp);
+
+	return status;
+}
+
+
+NTSTATUS ReadCompleteRoutine(PDEVICE_OBJECT pDevObj, PIRP pIrp, PVOID pContext)
+{
+	NTSTATUS status = pIrp->IoStatus.Status;
+	PKEYBOARD_INPUT_DATA pKeyboardInputData = NULL;
+	ULONG ulKeyCount = 0, i = 0;
+
+	if (NT_SUCCESS(status))
+	{
+		pKeyboardInputData = (PKEYBOARD_INPUT_DATA)pIrp->AssociatedIrp.SystemBuffer;
+		ulKeyCount = (ULONG)pIrp->IoStatus.Information / sizeof(KEYBOARD_INPUT_DATA);
+
+		//获取按键数据
+		for (i = 0; i < ulKeyCount; i++)
+		{
+			//Key Press按键按下扫描码
+			if (KEY_MAKE == pKeyboardInputData[i].Flags)
+			{
+				DbgPrint("Down: 0x%x\n", pKeyboardInputData[i].MakeCode);
+			}
+			else if (KEY_BREAK == pKeyboardInputData[i].Flags)
+			{
+				//按键弹起扫描吗
+				DbgPrint("Up 0x%x\n", pKeyboardInputData[i].MakeCode);
+			}
+		}
+	}
+
+	if (pIrp->PendingReturned)
+	{
+		IoMarkIrpPending(pIrp);
+	}
+
+	//减少IRP在队列的数量
+	((PDEVICE_EXTENSION)pDevObj->DeviceExtension)->uIrpInQueue--;
+
+	status = pIrp->IoStatus.Status;
+	return status;
+}
+
+NTSTATUS DispatchCommon(PDEVICE_OBJECT pObj, PIRP pIrp)
+{
+	pIrp->IoStatus.Status = STATUS_SUCCESS;
+	pIrp->IoStatus.Information = 0;
+	IoCompleteRequest(pIrp, IO_NO_INCREMENT);
+
+	return STATUS_SUCCESS;
+}
+
+VOID ShowError(PCHAR msg, NTSTATUS status)
+{
+	DbgPrint("%s Error 0x%x\n", msg, status);
+}
+
+VOID DriverUnload(PDRIVER_OBJECT driverObject)
+{
+	PDEVICE_OBJECT pDevObj = driverObject->DeviceObject;
+	LARGE_INTEGER liDelay = { 0 };
+	UNICODE_STRING uSymbolLinkName;
+	if (pDevObj == NULL || pDevObj->DeviceExtension == NULL)
+	{
+		goto exit;
+	}
+
+	//先把过滤设备和键盘设备分离，以免产生新的IRP_MJ_READ
+	IoDetachDevice(((PDEVICE_EXTENSION)pDevObj->DeviceExtension)->pAttachDevObj);
+
+	//对于未完成的IPR，因为之前通过IoSetCompletionRoutine已经设置IO完成例程
+	//那么对于未完成的IRP，在完成之后会调用该层设备的函数
+	//需要手动按键，使pending状态的IRP完成返回
+
+	liDelay.QuadPart = -1000000;
+	while (0 < ((PDEVICE_EXTENSION)pDevObj->DeviceExtension)->uIrpInQueue)
+	{
+		KdPrint(("剩余挂起IRP： %d\n", ((PDEVICE_EXTENSION)pDevObj->DeviceExtension)->uIrpInQueue));
+		KeDelayExecutionThread(KernelMode, FALSE, &liDelay);
+	}
+
+	if (IoIsWdmVersionAvailable(1, 0x10))
+	{
+		RtlInitUnicodeString(&uSymbolLinkName, SYMBOL_LINK_WIN7);
+	}
+	else
+	{
+		RtlInitUnicodeString(&uSymbolLinkName, SYMBOL_LINK_XP);
+	}
+
+	IoDeleteSymbolicLink(&uSymbolLinkName);
+
+	if (driverObject->DeviceObject)
+	{
+		IoDeleteDevice(driverObject->DeviceObject);
+	}
+exit:
+	DbgPrint("驱动完美卸载\r\n");
+}
+
